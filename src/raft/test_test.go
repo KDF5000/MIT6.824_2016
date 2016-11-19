@@ -86,11 +86,11 @@ func TestBasicAgree(t *testing.T) {
 
 	iters := 3
 	for index := 1; index < iters+1; index++ {
+
 		nd, _ := cfg.nCommitted(index)
 		if nd > 0 {
 			t.Fatalf("some have committed before Start()")
 		}
-
 		xindex := cfg.one(index*100, servers)
 		if xindex != index {
 			t.Fatalf("got index %v but expected %v", xindex, index)
