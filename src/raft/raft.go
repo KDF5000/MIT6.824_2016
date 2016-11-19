@@ -218,7 +218,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		rf.mu.Unlock()
 	}
-	fmt.Println(rf.me, "vote for ", args.CandidateId, reply.VoteGranted)
+	// fmt.Println(rf.me, "vote for ", args.CandidateId, reply.VoteGranted)
 }
 
 func (rf *Raft) applyLogEntries() {
@@ -236,7 +236,7 @@ func (rf *Raft) applyLogEntries() {
 		msg.Command = rf.Log[rf.LastApplied-base].Command
 
 		rf.ApplyCh <- msg
-		fmt.Println(rf.me, "send msg ", msg, "to applych successfully")
+		// fmt.Println(rf.me, "send msg ", msg, "to applych successfully")
 	}
 	rf.mu.Unlock()
 }
@@ -268,7 +268,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	base := rf.Log[0].Index
 	if args.PrevLogIndex < base || args.PrevLogIndex >= base+len(rf.Log) || args.PrevLogTerm != rf.Log[args.PrevLogIndex-base].Term {
 		reply.Success = false
-		fmt.Println(rf.me, "Refuse ", args.PrevLogIndex, len(rf.Log), args.PrevLogTerm)
+		// fmt.Println(rf.me, "Refuse ", args.PrevLogIndex, len(rf.Log), args.PrevLogTerm)
 		var conflict int
 		if args.PrevLogIndex < base {
 			conflict = 1
@@ -375,7 +375,7 @@ func (rf *Raft) processAppendEntriesReply(index int, args AppendEntriesArgs, rep
 			rf.persist()
 			rf.mu.Lock()
 		}
-		fmt.Println("args.Term", args.Term, "Reply.Term", reply.Term)
+		// fmt.Println("args.Term", args.Term, "Reply.Term", reply.Term)
 		if rf.Role == LEADER && args.Term == rf.CurrentTerm && args.Term >= reply.Term {
 			// rf.NextIndex[index]--
 			// fmt.Println("Nextindex--", rf.NextIndex)
@@ -465,7 +465,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.Log = append(rf.Log, logEntry)
 	index = base + len(rf.Log) - 1
 	term = rf.CurrentTerm
-	fmt.Println(rf.me, "Leader:", isLeader, " Start Agree:", command)
+	// fmt.Println(rf.me, "Leader:", isLeader, " Start Agree:", command)
 	go rf.sendHeartBeat()
 	rf.mu.Unlock()
 	// rf.Log[]
@@ -511,7 +511,7 @@ func (rf *Raft) followerAction() {
 }
 
 func (rf *Raft) becomeCandidate() {
-	fmt.Println(rf.me, " Becomes Candidate!")
+	// fmt.Println(rf.me, " Becomes Candidate!")
 	rf.mu.Lock()
 	rf.Role = CANDIDATE
 	rf.CurrentTerm++
@@ -540,38 +540,52 @@ func (rf *Raft) candidateAction() {
 				timeout := time.Now()
 				//retry RPC call every 10ms, timeout is 200ms
 				for rf.GetRole() == CANDIDATE && rf.CurrentTerm == args.Term && time.Since(timeout).Seconds() < 0.2 {
-					retryTime := 50 * time.Millisecond
-					checkTimeOut := time.NewTimer(time.Duration(10) * time.Millisecond)
-					// var ok1 = false
-					// var reply1 = &RequestVoteReply{}
-					// t := time.NewTimer(10 * time.Microsecond)
+
+					var ok1 = false
+					var reply1 = &RequestVoteReply{}
+					t := time.NewTimer(10 * time.Microsecond)
 					go func() {
-						ok = rf.sendRequestVote(index, args, reply)
+						ok1 = rf.sendRequestVote(index, args, reply1)
 					}()
-					// for j := 1; (j < 4) && (!ok1); j++ {
-					// 	<-t.C
-					// 	t.Reset(10 * time.Millisecond)
-					// }
-					// <-t.C
-					for !ok {
-						select {
-						case <-time.After(retryTime):
-							break
-						case <-checkTimeOut.C:
-							// fmt.Println("Send RequestVote to ", index)
-							if ok {
-								break
-							} else {
-								checkTimeOut.Reset(time.Duration(10) * time.Millisecond)
-							}
-						}
+					for j := 1; (j < 4) && (!ok1); j++ {
+						<-t.C
+						t.Reset(10 * time.Millisecond)
 					}
-					if ok {
-						// ok = true
-						// reply.Term = reply1.Term
-						// reply.VoteGranted = reply1.VoteGranted
+					<-t.C
+
+					if ok1 {
+						ok = true
+						reply.Term = reply1.Term
+						reply.VoteGranted = reply1.VoteGranted
 						break
 					}
+
+					// retryTime := 50 * time.Millisecond
+					// checkTimeOut := time.NewTimer(time.Duration(10) * time.Millisecond)
+
+					// go func() {
+					// 	ok1 = rf.sendRequestVote(index, args, reply1)
+					// }()
+					// for !ok1 {
+					// 	select {
+					// 	case <-time.After(retryTime):
+					// 		break
+					// 	case <-checkTimeOut.C:
+					// 		// fmt.Println("Send RequestVote to ", index)
+					// 		if ok1 {
+					// 			break
+					// 		} else {
+					// 			checkTimeOut.Reset(time.Duration(10) * time.Millisecond)
+					// 		}
+					// 	}
+					// }
+					// if ok1 {
+					// 	ok = true
+					// 	reply.Term = reply1.Term
+					// 	reply.VoteGranted = reply1.VoteGranted
+					// 	break
+					// }
+
 				}
 				// RPC might fail, election timeout and may re-elect.
 				if !ok {
@@ -602,7 +616,7 @@ func (rf *Raft) candidateAction() {
 		case collectVote <- true:
 			totalVotes++
 			//becomeleader
-			fmt.Println(rf.me, "Total Vote", totalVotes)
+			// fmt.Println(rf.me, "Total Vote", totalVotes)
 			if totalVotes > len(rf.peers)/2 {
 				close(collectVote)
 				rf.becomeLeader()
@@ -611,7 +625,7 @@ func (rf *Raft) candidateAction() {
 			}
 		case <-electionTimeout.C:
 			//restart election
-			fmt.Println(rf.me, "restart Election!")
+			// fmt.Println(rf.me, "restart Election!")
 			rf.becomeCandidate()
 			return
 		case <-rf.HeartBeatCh:
@@ -637,7 +651,7 @@ func (rf *Raft) sendHeartBeat() {
 					reply := &AppendEntriesReply{}
 					ok := rf.sendAppendEntries(index, args, reply)
 					if ok {
-						fmt.Println(rf.me, "send heart beat to ", index, "ok", reply)
+						// fmt.Println(rf.me, "send heart beat to ", index, "ok", reply)
 						rf.processAppendEntriesReply(index, args, reply)
 					}
 				}
@@ -647,7 +661,7 @@ func (rf *Raft) sendHeartBeat() {
 }
 
 func (rf *Raft) becomeLeader() {
-	fmt.Println(rf.me, "Become leader")
+	// fmt.Println(rf.me, "Become leader")
 	rf.mu.Lock()
 	rf.Role = LEADER
 	rf.NextIndex = make([]int, len(rf.peers))
