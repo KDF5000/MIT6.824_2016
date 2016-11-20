@@ -207,6 +207,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	lastIndex := rf.Log[len(rf.Log)-1].Index
 	lastTerm := rf.Log[len(rf.Log)-1].Term
 
+	//&& lastIndex > rf.CommitIndex
 	if (rf.VotedFor == -1 || rf.VotedFor == args.CandidateId) &&
 		((args.LastLogTerm > lastTerm) || (lastTerm == args.LastLogTerm && lastIndex <= args.LastLogIndex)) {
 		rf.VotedFor = args.CandidateId
