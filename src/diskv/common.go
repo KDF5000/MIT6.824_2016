@@ -24,7 +24,8 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-
+	Client   int64
+	Sequence int
 }
 
 type PutAppendReply struct {
@@ -40,4 +41,3 @@ type GetReply struct {
 	Err   Err
 	Value string
 }
-
