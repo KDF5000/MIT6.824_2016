@@ -1,9 +1,10 @@
 package raftkv
 
 import (
+	"bytes"
 	"container/list"
 	"encoding/gob"
-	// "fmt"
+	"fmt"
 	"labrpc"
 	"log"
 	"raft"
@@ -42,6 +43,7 @@ type RaftKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	persister   *raft.Persister
 	data        map[string]string
 	executedSeq map[int64]int
 	notify      map[int][]chan Op
@@ -49,14 +51,74 @@ type RaftKV struct {
 	Recv  chan raft.ApplyMsg
 	Msgs  *list.List
 	msgMu sync.Mutex
+
+	lastIncludedIndex int
+	lastIncludedTerm  int
+}
+
+func (kv *RaftKV) persist() (int, int, bool) {
+	// Your code here.
+	// Example:
+	// w := new(bytes.Buffer)
+	// e := gob.NewEncoder(w)
+	// e.Encode(rf.xxx)
+	// e.Encode(rf.yyy)
+	// data := w.Bytes()
+	// rf.persister.SaveRaftState(data)
+	lastIncludedIndex := 0
+	lastIncludedTerm := 0
+	r := bytes.NewBuffer(kv.persister.ReadSnapshot())
+	d := gob.NewDecoder(r)
+	d.Decode(&lastIncludedIndex)
+	d.Decode(&lastIncludedTerm)
+
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+
+	kv.mu.Lock()
+	curIndex := kv.lastIncludedIndex
+	curTerm := kv.lastIncludedTerm
+	if lastIncludedIndex >= curIndex {
+		kv.mu.Unlock()
+		return curIndex, curTerm, false
+	}
+
+	e.Encode(kv.lastIncludedIndex)
+	e.Encode(kv.lastIncludedTerm)
+	e.Encode(kv.data)
+	e.Encode(kv.executedSeq)
+
+	data := w.Bytes()
+	kv.persister.SaveSnapshot(data)
+	kv.mu.Unlock()
+	return curIndex, curTerm, true
+}
+
+func (kv *RaftKV) readPersist(snapshot []byte) {
+	// Your code here.
+	// Example:
+	// r := bytes.NewBuffer(data)
+	// d := gob.NewDecoder(r)
+	// d.Decode(&rf.xxx)
+	// d.Decode(&rf.yyy)
+	r := bytes.NewBuffer(snapshot)
+	d := gob.NewDecoder(r)
+
+	d.Decode(&kv.lastIncludedIndex)
+	d.Decode(&kv.lastIncludedTerm)
+	d.Decode(&kv.data)
+	d.Decode(&kv.executedSeq)
 }
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	op := Op{args.Client, args.Sequence, args.Key, "", "Get", ""}
-
-	DPrintf("Begin to Get", op)
 	kv.mu.Lock()
+	if _, ok := kv.executedSeq[args.Client]; !ok {
+		kv.executedSeq[args.Client] = -1
+	}
+	DPrintf("Begin to Get", op)
+
 	index, term, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		kv.mu.Unlock()
@@ -84,10 +146,12 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 			kv.mu.Lock()
 			currentTerm, _ := kv.rf.GetState()
 			if term != currentTerm {
-				reply.WrongLeader = true
-				delete(kv.notify, index)
-				kv.mu.Unlock()
-				return
+				if kv.lastIncludedIndex < index {
+					reply.WrongLeader = true
+					delete(kv.notify, index)
+					kv.mu.Unlock()
+					return
+				}
 			}
 			kv.mu.Unlock()
 		}
@@ -109,14 +173,20 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 		}
 	}
 	DPrintf("Get reply", reply)
+	return
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	// fmt.Println("Server PutAppend")
 	op := Op{args.Client, args.Sequence, args.Key, args.Value, args.Op, ""}
-
 	kv.mu.Lock()
+	if _, ok := kv.executedSeq[args.Client]; !ok {
+		kv.executedSeq[args.Client] = -1
+	}
+	// fmt.Println("Server start to call rf.Start")
 	index, term, isLeader := kv.rf.Start(op)
+	// fmt.Println("rf Start:", index, term, isLeader)
 	if !isLeader {
 		kv.mu.Unlock()
 		reply.WrongLeader = true
@@ -124,7 +194,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	//
-	DPrintf("Begin to PutAppend", op)
+	// fmt.Println("Server Begin to PutAppend", op)
 	if _, ok := kv.notify[index]; !ok {
 		kv.notify[index] = make([]chan Op, 0)
 	}
@@ -146,10 +216,12 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			kv.mu.Lock()
 			currentTerm, _ := kv.rf.GetState()
 			if term != currentTerm {
-				reply.WrongLeader = true
-				delete(kv.notify, index)
-				kv.mu.Unlock()
-				return
+				if kv.lastIncludedIndex < index {
+					reply.WrongLeader = true
+					delete(kv.notify, index)
+					kv.mu.Unlock()
+					return
+				}
 			}
 			kv.mu.Unlock()
 		}
@@ -182,7 +254,14 @@ func (kv *RaftKV) applyCommand(msg raft.ApplyMsg) {
 	// Index       int
 	// Term        int
 	// Command     interface{}
-	// DPrintf("applych:", msg)
+	// fmt.Println("applych:", msg)
+	if msg.UseSnapshot {
+		kv.readPersist(msg.Snapshot)
+		return
+	}
+	// fmt.Println(kv.me, "receive command at index ", msg.Index)
+	kv.lastIncludedIndex = msg.Index
+	kv.lastIncludedTerm = kv.rf.GetTerm(kv.lastIncludedIndex)
 	index := msg.Index
 	// term := msg.Term
 	op := msg.Command.(Op)
@@ -194,6 +273,7 @@ func (kv *RaftKV) applyCommand(msg raft.ApplyMsg) {
 	if _, ok := kv.executedSeq[clientId]; !ok {
 		kv.executedSeq[clientId] = -1
 	}
+
 	if opSequence > kv.executedSeq[clientId] {
 		switch op.Type {
 		case "Get":
@@ -258,6 +338,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(RaftKV)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
+	kv.persister = persister
 
 	// Your initialization code here.
 	kv.data = make(map[string]string, 0)
@@ -268,6 +349,18 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.notify = make(map[int][]chan Op, 0)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.executedSeq = make(map[int64]int, 0)
+
+	kv.lastIncludedIndex = 0
+	kv.lastIncludedTerm = 0
+
+	kv.readPersist(persister.ReadSnapshot())
+	// fmt.Println("Recover for persist:", kv.lastIncludedIndex)
+	if kv.rf.GetFirstIndex() < kv.lastIncludedIndex {
+		kv.rf.CutLog(kv.lastIncludedIndex, kv.lastIncludedTerm)
+		// fmt.Println("cut log to ", kv.lastIncludedIndex)
+	} else if kv.rf.GetFirstIndex() > kv.lastIncludedIndex {
+		fmt.Println("KvServer Error: FirstIndex > LastIncludedIndex")
+	}
 
 	// recvChan := make(chan raft.ApplyMsg)
 	// go func() {
@@ -405,7 +498,17 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 		for {
 			select {
 			case <-time.After(5 * time.Millisecond):
-
+				if kv.rf.BeginSnapshot() {
+					if persister.RaftStateSize() >= maxraftstate {
+						// fmt.Println("Begin snapshot:", persister.RaftStateSize(), kv.rf.GetRole())
+						index, term, ok := kv.persist()
+						if ok {
+							kv.rf.CutLog(index, term)
+							// fmt.Println(kv.me, "cut log to", index)
+						}
+					}
+					kv.rf.EndSnapshot()
+				}
 			}
 		}
 	}()

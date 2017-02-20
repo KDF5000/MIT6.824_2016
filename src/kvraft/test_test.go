@@ -421,6 +421,7 @@ func TestSnapshotRPC(t *testing.T) {
 			ck1.Put(strconv.Itoa(i), strconv.Itoa(i))
 		}
 		time.Sleep(electionTimeout)
+		// fmt.Println("****************Begin to pub B*****************")
 		ck1.Put("b", "B")
 	}
 

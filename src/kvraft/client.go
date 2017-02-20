@@ -10,7 +10,7 @@ type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
 	clientID    int64
-	sequence    int
+	Sequence    int
 	leaderIndex int //record recent leader
 }
 
@@ -26,7 +26,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	// You'll have to add code here.
 	ck.clientID = nrand()
-	ck.sequence = 0
+	ck.Sequence = 0
 	ck.leaderIndex = 0
 	return ck
 }
@@ -46,8 +46,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	args := GetArgs{key, ck.clientID, ck.sequence}
-	ck.sequence++
+	args := GetArgs{key, ck.clientID, ck.Sequence}
+	ck.Sequence++
 	i := ck.leaderIndex
 	for {
 		reply := GetReply{}
@@ -55,6 +55,8 @@ func (ck *Clerk) Get(key string) string {
 			// fmt.Println("Reply to Get:", reply)
 			if !reply.WrongLeader && reply.Err == OK {
 				// fmt.Println("Get Value, ", reply.Value)
+				ck.leaderIndex = i
+				// fmt.Printf("Get %s=%s\n", key, reply.Value)
 				return reply.Value
 			} else {
 				// fmt.Println("Get Error", reply.Err)
@@ -62,6 +64,7 @@ func (ck *Clerk) Get(key string) string {
 		}
 		i = (i + 1) % len(ck.servers)
 	}
+
 }
 
 //
@@ -76,11 +79,11 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	args := PutAppendArgs{key, value, op, ck.clientID, ck.sequence}
-	ck.sequence++
+	// fmt.Printf("begin to put: %s=%s\n", key, value)
+	args := PutAppendArgs{key, value, op, ck.clientID, ck.Sequence}
+	ck.Sequence++
 
 	i := ck.leaderIndex
-	num_servers := len(ck.servers)
 	for {
 		reply := PutAppendReply{}
 		ok := ck.servers[i].Call("RaftKV.PutAppend", &args, &reply)
@@ -88,13 +91,16 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		if ok {
 			if !reply.WrongLeader && reply.Err == OK {
 				// fmt.Println("PutAppend Success")
+				ck.leaderIndex = i
 				break
 			} else {
 				// fmt.Println("Failed to Put", reply.Err)
 			}
 		}
-		i = (i + 1) % num_servers
+		i = (i + 1) % len(ck.servers)
 	}
+	// fmt.Printf("PutAppend %s=%s\n", key, value)
+
 }
 
 func (ck *Clerk) Put(key string, value string) {
