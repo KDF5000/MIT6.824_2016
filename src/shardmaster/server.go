@@ -3,9 +3,10 @@ package shardmaster
 import (
 	"container/list"
 	"encoding/gob"
-	"fmt"
+	// "fmt"
 	"labrpc"
 	"raft"
+	"sort"
 	"sync"
 	"time"
 )
@@ -32,14 +33,16 @@ type Op struct {
 	// Your data here.
 	Client   int64
 	Sequence int
-	// Config   Config
+
 	Servers map[int][]string //for join
 	GIDS    []int            //for leave
 	//for move
 	Shard int
 	GID   int
 	//query
-	Num  int
+	Num    int
+	Config Config
+
 	Type string
 	Err  Err
 }
@@ -49,6 +52,54 @@ type OpReply struct {
 	Type        string
 	WrongLeader bool
 	Err         Err
+}
+
+func (sm *ShardMaster) contains(arr []int, ele int) bool {
+	for _, v := range arr {
+		if v == ele {
+			return true
+		}
+	}
+	return false
+}
+
+func (sm *ShardMaster) hasKey(data map[int]int, key int) bool {
+	if _, ok := data[key]; ok {
+		return true
+	}
+	return false
+}
+
+func (sm *ShardMaster) rebalance(shards []int, groups []int) {
+	countShards := make(map[int]int, 0)
+	for _, gid := range shards {
+		if sm.contains(groups, gid) {
+			if _, ok := countShards[gid]; !ok {
+				countShards[gid] = 1
+			} else {
+				countShards[gid] += 1
+			}
+		}
+	}
+	sort.Ints(groups)
+	mean := len(shards) / len(groups)
+
+	for i := 0; i < 2; i++ {
+		for shard, gid := range shards {
+			if !sm.hasKey(countShards, gid) || countShards[gid] > mean+i {
+				for _, newGid := range groups {
+					if countShards[newGid] < mean+i {
+						shards[shard] = newGid
+						countShards[newGid]++
+						if sm.hasKey(countShards, gid) {
+							countShards[gid]--
+						}
+						break
+					}
+				}
+			}
+		}
+	}
 }
 
 func (sm *ShardMaster) startRequest(op Op, reply *OpReply) {
@@ -61,7 +112,7 @@ func (sm *ShardMaster) startRequest(op Op, reply *OpReply) {
 		sm.mu.Unlock()
 		return
 	}
-	fmt.Printf("%d receive request %s %d:%d\n", sm.me, op.Type, op.Client, op.Sequence)
+	// fmt.Printf("%d receive request %s %d:%d\n", sm.me, op.Type, op.Client, op.Sequence)
 	if _, ok := sm.notify[index]; !ok {
 		sm.notify[index] = make([]chan Op, 0)
 	}
@@ -107,35 +158,13 @@ func (sm *ShardMaster) startRequest(op Op, reply *OpReply) {
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
-	sm.mu.Lock()
-	lastConfig := sm.configs[len(sm.configs)-1]
-	var newConfig Config
-	newConfig.Num = lastConfig.Num + 1
-	newConfig.Groups = make(map[int][]string, 0)
-	gids := make([]int, 0)
-	//生成新的groups
-	for k, v := range lastConfig.Groups {
-		newConfig.Groups[k] = v //是否需要重新创建一个slice
-		gids = append(gids, k)
+	//copy一份，可能args的server会指向别的
+	servers := make(map[int][]string, 0)
+	for gid := range args.Servers {
+		servers[gid] = args.Servers[gid]
 	}
-	for k, v := range args.Servers {
-		if _, ok := newConfig.Groups[k]; !ok {
-			gids = append(gids, k)
-		}
-		newConfig.Groups[k] = v //是否需要重新创建一个slice
-	}
-	//重新均衡的分配shards
-	shardsNum := len(newConfig.Shards)
-	for i := 0; i < shardsNum; {
-		for j := 0; j < len(gids) && i < shardsNum; j++ {
-			newConfig.Shards[i] = gids[j]
-			i++
-		}
-	}
-	newConfig.Num = lastConfig.Num + 1
-	sm.mu.Unlock()
 	//start request
-	op := Op{args.Client, args.Sequence, newConfig, "Join", OK}
+	op := Op{Client: args.Client, Sequence: args.Sequence, Servers: servers, Type: "Join"}
 	var opReply OpReply
 	sm.startRequest(op, &opReply)
 	reply.WrongLeader = opReply.WrongLeader
@@ -144,7 +173,6 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 }
 
 func (sm *ShardMaster) applyJoin(op Op) {
-	sm.mu.Lock()
 	lastConfig := sm.configs[len(sm.configs)-1]
 	var newConfig Config
 	newConfig.Num = lastConfig.Num + 1
@@ -162,20 +190,29 @@ func (sm *ShardMaster) applyJoin(op Op) {
 		newConfig.Groups[k] = v //是否需要重新创建一个slice
 	}
 	//重新均衡的分配shards
-	shardsNum := len(newConfig.Shards)
-	for i := 0; i < shardsNum; {
-		for j := 0; j < len(gids) && i < shardsNum; j++ {
-			newConfig.Shards[i] = gids[j]
-			i++
-		}
-	}
+	sm.rebalance(newConfig.Shards[:], gids)
+	// shardsNum := len(newConfig.Shards)
+	// for i := 0; i < shardsNum; {
+	// 	for j := 0; j < len(gids) && i < shardsNum; j++ {
+	// 		newConfig.Shards[i] = gids[j]
+	// 		i++
+	// 	}
+	// }
 	sm.configs = append(sm.configs, newConfig)
-	sm.mu.Unlock()
 }
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	// Your code here.
-	sm.mu.Lock()
+	//start request
+	op := Op{Client: args.Client, Sequence: args.Sequence, GIDS: args.GIDs, Type: "Leave"}
+	var opReply OpReply
+	sm.startRequest(op, &opReply)
+	reply.WrongLeader = opReply.WrongLeader
+	reply.Err = opReply.Err
+	return
+}
+
+func (sm *ShardMaster) applyLeave(op Op) {
 	lastConfig := sm.configs[len(sm.configs)-1]
 	var newConfig Config
 	newConfig.Groups = make(map[int][]string, 0)
@@ -184,7 +221,7 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 		newConfig.Groups[k] = v //是否需要重新创建一个slice
 	}
 	//delete gids
-	for _, gid := range args.GIDs {
+	for _, gid := range op.GIDS {
 		delete(newConfig.Groups, gid)
 	}
 	gids := make([]int, 0)
@@ -192,18 +229,23 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 		gids = append(gids, k)
 	}
 	//重新均衡的分配shards
-	shardsNum := len(newConfig.Shards)
-	for i := 0; i < shardsNum; {
-		for j := 0; j < len(gids) && i < shardsNum; j++ {
-			newConfig.Shards[i] = gids[j]
-			i++
-		}
-	}
+	// shardsNum := len(newConfig.Shards)
+	// for i := 0; i < shardsNum; {
+	// 	for j := 0; j < len(gids) && i < shardsNum; j++ {
+	// 		newConfig.Shards[i] = gids[j]
+	// 		i++
+	// 	}
+	// }
+	sm.rebalance(newConfig.Shards[:], gids)
 	newConfig.Num = lastConfig.Num + 1
 	// fmt.Println(sm.me, "Leave:", newConfig)
-	sm.mu.Unlock()
-	//start request
-	op := Op{args.Client, args.Sequence, newConfig, "Leave", OK}
+	sm.configs = append(sm.configs, newConfig)
+}
+
+func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
+	// Your code here.
+	//start request using raft
+	op := Op{Client: args.Client, Sequence: args.Sequence, Shard: args.Shard, GID: args.GID, Type: "Move"}
 	var opReply OpReply
 	sm.startRequest(op, &opReply)
 	reply.WrongLeader = opReply.WrongLeader
@@ -211,9 +253,7 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	return
 }
 
-func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
-	// Your code here.
-	sm.mu.Lock()
+func (sm *ShardMaster) applyMove(op Op) {
 	lastConfig := sm.configs[len(sm.configs)-1]
 	var newConfig Config
 	newConfig.Groups = make(map[int][]string, 0)
@@ -227,34 +267,26 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	}
 	newConfig.Num = lastConfig.Num + 1
 	//Move
-	newConfig.Shards[args.Shard] = args.GID
-	sm.mu.Unlock()
-	//start request using raft
-	op := Op{args.Client, args.Sequence, newConfig, "Move", OK}
-	var opReply OpReply
-	sm.startRequest(op, &opReply)
-	reply.WrongLeader = opReply.WrongLeader
-	reply.Err = opReply.Err
-	return
+	newConfig.Shards[op.Shard] = op.GID
+	sm.configs = append(sm.configs, newConfig)
 }
-
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
-	var newConfig Config
-	sm.mu.Lock()
-	if args.Num == -1 || args.Num > len(sm.configs)-1 {
-		newConfig = sm.configs[len(sm.configs)-1]
-	} else {
-		newConfig = sm.configs[args.Num]
-	}
-	sm.mu.Unlock()
-	op := Op{args.Client, args.Sequence, newConfig, "Query", OK}
+	op := Op{Client: args.Client, Sequence: args.Sequence, Num: args.Num, Type: "Query"}
 	var opReply OpReply
 	sm.startRequest(op, &opReply)
 	reply.WrongLeader = opReply.WrongLeader
 	reply.Err = opReply.Err
 	reply.Config = opReply.Config
 	return
+}
+
+func (sm *ShardMaster) applyQuery(op *Op) {
+	if op.Num == -1 || op.Num > len(sm.configs)-1 {
+		op.Config = sm.configs[len(sm.configs)-1]
+	} else {
+		op.Config = sm.configs[op.Num]
+	}
 }
 
 // func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
@@ -291,20 +323,20 @@ func (sm *ShardMaster) applyCommand(msg raft.ApplyMsg) {
 	index := msg.Index
 
 	op := msg.Command.(Op)
-	if op.Type != "Query" {
-		sm.configs = append(sm.configs, op.Config)
-	}
-	// switch op.Type {
-	// case "Join":
-	// 	sm.configs = append(sm.configs, op.Config)
-	// case "Leave":
-	// 	//do something
 
-	// case "Move":
-	// 	//do something
-	// case "Query":
-	// 	//do something
-	// }
+	switch op.Type {
+	case "Join":
+		sm.applyJoin(op)
+	case "Leave":
+		//do something
+		sm.applyLeave(op)
+	case "Move":
+		//do something
+		sm.applyMove(op)
+	case "Query":
+		//do something
+		sm.applyQuery(&op)
+	}
 	if _, ok := sm.notify[index]; !ok {
 		// fmt.Println(sm.me, "No request needed to be notified!")
 		return
