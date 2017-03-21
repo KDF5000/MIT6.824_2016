@@ -27,7 +27,7 @@ func TestStaticShards(t *testing.T) {
 
 	cfg.join(0)
 	cfg.join(1)
-
+	// time.Sleep(1)
 	n := 10
 	ka := make([]string, n)
 	va := make([]string, n)
@@ -92,6 +92,7 @@ func TestJoinLeave(t *testing.T) {
 
 	cfg.join(0)
 
+	// time.Sleep(2)
 	n := 10
 	ka := make([]string, n)
 	va := make([]string, n)
@@ -105,7 +106,6 @@ func TestJoinLeave(t *testing.T) {
 	}
 
 	cfg.join(1)
-
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 		x := randstring(5)
@@ -114,7 +114,6 @@ func TestJoinLeave(t *testing.T) {
 	}
 
 	cfg.leave(0)
-
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 		x := randstring(5)
@@ -123,7 +122,7 @@ func TestJoinLeave(t *testing.T) {
 	}
 
 	// allow time for shards to transfer.
-	time.Sleep(1 * time.Second)
+	time.Sleep(2 * time.Second)
 
 	cfg.checklogs()
 	cfg.ShutdownGroup(0)
@@ -392,10 +391,12 @@ func TestConcurrent2(t *testing.T) {
 	}
 
 	var done int32
-	ch := make(chan bool)
+	// ch := make(chan bool)
+	ch := make(chan int)
 
 	ff := func(i int, ck1 *Clerk) {
-		defer func() { ch <- true }()
+		// defer func() { ch <- true }()
+		defer func() { ch <- i }()
 		for atomic.LoadInt32(&done) == 0 {
 			x := randstring(1)
 			ck1.Append(ka[i], x)
@@ -432,8 +433,10 @@ func TestConcurrent2(t *testing.T) {
 	atomic.StoreInt32(&done, 1)
 	for i := 0; i < n; i++ {
 		<-ch
+		// v := <-ch
+		// fmt.Println(v)
 	}
-
+	time.Sleep(1)
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}

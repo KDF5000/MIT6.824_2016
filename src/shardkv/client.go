@@ -14,6 +14,8 @@ import "math/big"
 import "shardmaster"
 import "time"
 
+// import "fmt"
+
 //
 // which shard is a key in?
 // please use this function,
@@ -41,7 +43,7 @@ type Clerk struct {
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
 	clientID int64
-	Sequence int
+	Sequence int64
 }
 
 //
@@ -62,7 +64,6 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.Sequence = 0
 	// ck.config = shardmaster.Config{}
 	// ck.config.Groups = map[int][]string{}
-	ck.config = ck.sm.Query(-1)
 	return ck
 }
 
@@ -75,10 +76,15 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
+	args.Client = ck.clientID
+	args.Sequence = ck.Sequence
 	ck.Sequence++
+
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
+
+		// fmt.Printf("Client get with Config Num:%d\n", ck.config.Num)
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
@@ -88,7 +94,8 @@ func (ck *Clerk) Get(key string) string {
 				if ok && reply.WrongLeader == false && (reply.Err == OK || reply.Err == ErrNoKey) {
 					return reply.Value
 				}
-				if ok && (reply.Err == ErrWrongGroup) {
+				if ok && (reply.Err == ErrWrongGroup || reply.Err == "WaitReceive") {
+					// fmt.Printf("Client Get ErrWrongGroup,config:%v\n ", ck.config)
 					break
 				}
 			}
@@ -111,7 +118,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Value = value
 	args.Op = op
 	args.Sequence = ck.Sequence
+	args.Client = ck.clientID
 	ck.Sequence++
+
 	// fmt.Printf("Client %d request to put %s=%s\n", ck.clientID, key, value)
 	for {
 		shard := key2shard(key)
@@ -125,6 +134,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 					return
 				}
 				if ok && reply.Err == ErrWrongGroup {
+					// fmt.Printf("Client Put WrongGroup,Num:%d\n", ck.config.Num)
 					break
 				}
 			}
