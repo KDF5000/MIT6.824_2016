@@ -224,8 +224,8 @@ func (kv *ShardKV) makeSendShardArgs(shard int, oldconfig shardmaster.Config, ne
 	args.Config = oldconfig
 	args.NewConfig = newConfig
 	for key := range kv.data {
-		s := key2shard(key) //must assign the return val to a new var?!!!!
-		if s == shard {
+		// s := key2shard(key) //must assign the return val to a new var?!!!!
+		if key2shard(key) == shard {
 			args.Data[key] = kv.data[key]
 		}
 	}
@@ -239,7 +239,7 @@ func (kv *ShardKV) sendShard(args SendShardArgs) {
 	servers := args.NewConfig.Groups[args.NewConfig.Shards[args.Shard]]
 	for {
 		select {
-		case <-time.After(5 * time.Millisecond):
+		case <-time.After(2 * time.Millisecond):
 			kv.mu.Lock()
 			for si := 0; si < len(servers); si++ {
 				srv := kv.make_end(servers[si])
@@ -294,6 +294,7 @@ func (kv *ShardKV) deleteShard(data map[string]string, shard int, num int) {
 		kv.Shards[shard] = 0
 		// fmt.Printf("Server %d Delete Shard:%d, Maxraftstate:%d\n", kv.me, shard, kv.maxraftstate)
 		if kv.maxraftstate > 0 {
+			//don`t call kv.persist(), because it will not persist when kv.lastIncludedIndex does not change
 			w := new(bytes.Buffer)
 			e := gob.NewEncoder(w)
 			e.Encode(kv.lastIncludedIndex)
@@ -301,8 +302,8 @@ func (kv *ShardKV) deleteShard(data map[string]string, shard int, num int) {
 
 			e.Encode(kv.CurConfigNum)
 			e.Encode(kv.Shards)
-			e.Encode(kv.data)
 			e.Encode(kv.ExecutedSeq)
+			e.Encode(kv.data)
 
 			data := w.Bytes()
 			kv.persister.SaveSnapshot(data)
@@ -385,6 +386,8 @@ func (kv *ShardKV) applyConfig(op Op, res *OpReply) {
 	}
 	res.Err = OK
 }
+
+//****************************
 
 func (kv *ShardKV) applyCommand(msg raft.ApplyMsg) {
 	if msg.UseSnapshot {
@@ -546,6 +549,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.Configs[0].Groups = map[int][]string{}
 	kv.CurConfigNum = 0
 
+	// fmt.Printf("Restart Server %d \n", kv.me)
 	kv.readPersist(persister.ReadSnapshot())
 
 	if kv.rf.GetFirstIndex() < kv.lastIncludedIndex {
@@ -630,41 +634,39 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		}
 	}()
 	//detect configurations changing
-	go kv.updateConfig()
-	return kv
-}
-
-func (kv *ShardKV) updateConfig() {
-	for {
-		select {
-		case <-time.After(50 * time.Millisecond):
-			//check if there is a new configuration
-			kv.mu.Lock()
-			config := kv.sm.Query(-1)
-			oldConfig := kv.Configs[len(kv.Configs)-1]
-			// kv.mu.Unlock()
-			if config.Num > oldConfig.Num {
-				// if kv.rf.GetRole() == 2 { //LEADER
-				// fmt.Printf("Server %d receive NewConfig:%v\n", kv.me, config)
-				if config.Num > oldConfig.Num+1 {
-					config = kv.sm.Query(oldConfig.Num + 1)
-				}
-				op := Op{Config: config, Type: "Config"}
-				op.Sequence = nrand()
-				// op.Client = int64(kv.me)
-				opReply := &OpReply{}
-				kv.mu.Unlock()
-				// fmt.Printf("Server %d begin to replicate Config %v\n", kv.me, config)
-				kv.startRequest(op, opReply)
+	go func() {
+		for {
+			select {
+			case <-time.After(50 * time.Millisecond):
+				//check if there is a new configuration
 				kv.mu.Lock()
-				// fmt.Printf("Replicate Config %s\n ", configReply.Err)
-				if opReply.WrongLeader == false && opReply.Err == OK {
-					//
-					// fmt.Printf("Server %d request for replicating config successfully\n", kv.me)
+				config := kv.sm.Query(-1)
+				oldConfig := kv.Configs[len(kv.Configs)-1]
+				// kv.mu.Unlock()
+				if config.Num > oldConfig.Num {
+					// if kv.rf.GetRole() == 2 { //LEADER
+					// fmt.Printf("Server %d receive NewConfig:%v\n", kv.me, config)
+					if config.Num > oldConfig.Num+1 {
+						config = kv.sm.Query(oldConfig.Num + 1)
+					}
+					op := Op{Config: config, Type: "Config"}
+					op.Sequence = nrand()
+					// op.Client = int64(kv.me)
+					opReply := &OpReply{}
+					kv.mu.Unlock()
+					// fmt.Printf("Server %d begin to replicate Config %v\n", kv.me, config)
+					kv.startRequest(op, opReply)
+					kv.mu.Lock()
+					// fmt.Printf("Replicate Config %s\n ", configReply.Err)
+					if opReply.WrongLeader == false && opReply.Err == OK {
+						//
+						// fmt.Printf("Server %d request for replicating config successfully\n", kv.me)
+					}
+					// }
 				}
-				// }
+				kv.mu.Unlock()
 			}
-			kv.mu.Unlock()
 		}
-	}
+	}()
+	return kv
 }
