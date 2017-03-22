@@ -24,7 +24,7 @@ type ShardMaster struct {
 	msgMu  sync.Mutex
 
 	lastIncludeIndex int
-	lastIncludeTerm  int
+	executeSeq       map[int64]int
 
 	configs []Config // indexed by config num
 }
@@ -48,6 +48,8 @@ type Op struct {
 }
 
 type OpReply struct {
+	Client      int64
+	Sequence    int64
 	Config      Config
 	Type        string
 	WrongLeader bool
@@ -102,9 +104,86 @@ func (sm *ShardMaster) rebalance(shards []int, groups []int) {
 	}
 }
 
+func (sm *ShardMaster) firstJoinBalance(shards []int, newServers []int) {
+	mean := len(shards) / len(newServers)
+	serverIndex := 0
+	flag := 1
+	for shard, _ := range shards {
+		if flag > mean {
+			serverIndex = (serverIndex + 1) % len(newServers)
+			flag = 1
+		}
+		shards[shard] = newServers[serverIndex]
+		flag++
+	}
+}
+
+func (sm *ShardMaster) joinRebalance(shards []int, newServer []int) {
+	gidShards := make(map[int][]int, 0)
+	gids := make([]int, 0)
+	for shard, gid := range shards {
+		var data []int
+		if _, ok := gidShards[gid]; !ok {
+			data = make([]int, 0)
+			gids = append(gids, gid)
+		} else {
+			data = gidShards[gid]
+		}
+		data = append(data, shard)
+		gidShards[gid] = data
+	}
+	mean := len(shards) / (len(newServer) + len(gids))
+	mod := len(shards) % (len(newServer) + len(gids))
+
+	flag := 0
+	meanF := 1
+	transfer := 0
+	for _, gid := range gids {
+		gShards := gidShards[gid]
+		if mod > 0 {
+			mod--
+			if len(gShards) > mean+1 {
+				for len(gShards) > mean+1 {
+					if meanF > mean {
+						flag = (flag + 1) % len(newServer)
+						meanF = 1
+					}
+					s := gShards[len(gShards)-1]
+					if _, ok := gidShards[newServer[flag]]; !ok {
+						shards[s] = newServer[flag]
+						gShards = gShards[:len(gShards)-1]
+						meanF++
+						// fmt.Println(meanF, flag, newServer[flag])
+					}
+					transfer++
+				}
+			}
+		} else {
+			if len(gShards) > mean {
+				for len(gShards) > mean {
+					if meanF > mean {
+						flag = (flag + 1) % len(newServer)
+						meanF = 1
+					}
+					s := gShards[len(gShards)-1]
+					if _, ok := gidShards[newServer[flag]]; !ok {
+						shards[s] = newServer[flag]
+						gShards = gShards[:len(gShards)-1]
+						meanF++
+					}
+					transfer++
+				}
+			}
+		}
+	}
+}
 func (sm *ShardMaster) startRequest(op Op, reply *OpReply) {
 	sm.mu.Lock()
 	// fmt.Println("Join:", newConfig, sm.rf.GetRole())
+	if _, ok := sm.executeSeq[op.Client]; !ok {
+		sm.executeSeq[op.Client] = -1
+	}
+
 	index, term, isLeader := sm.rf.Start(op)
 	if !isLeader {
 		// fmt.Println("Join: WrongLeader")
@@ -177,11 +256,12 @@ func (sm *ShardMaster) applyJoin(op Op) {
 	var newConfig Config
 	newConfig.Num = lastConfig.Num + 1
 	newConfig.Groups = make(map[int][]string, 0)
+	newConfig.Shards = lastConfig.Shards
 	gids := make([]int, 0)
 	//生成新的groups
 	for k, v := range lastConfig.Groups {
 		newConfig.Groups[k] = v //是否需要重新创建一个slice
-		gids = append(gids, k)
+		// gids = append(gids, k)
 	}
 	for k, v := range op.Servers {
 		if _, ok := newConfig.Groups[k]; !ok {
@@ -190,7 +270,16 @@ func (sm *ShardMaster) applyJoin(op Op) {
 		newConfig.Groups[k] = v //是否需要重新创建一个slice
 	}
 	//重新均衡的分配shards
-	sm.rebalance(newConfig.Shards[:], gids)
+	if len(sm.configs) == 1 {
+		// fmt.Println("first join")
+		sm.firstJoinBalance(newConfig.Shards[:], gids)
+		// fmt.Println(newConfig.Shards)
+	} else {
+		// fmt.Println("apply Join", sm.configs, newConfig.Shards, gids)
+		sm.joinRebalance(newConfig.Shards[:], gids)
+		// fmt.Println(newConfig.Shards)
+	}
+	// sm.rebalance(newConfig.Shards[:], gids)
 	// shardsNum := len(newConfig.Shards)
 	// for i := 0; i < shardsNum; {
 	// 	for j := 0; j < len(gids) && i < shardsNum; j++ {
@@ -319,24 +408,33 @@ func (sm *ShardMaster) applyQuery(op *Op) {
 //apply request
 func (sm *ShardMaster) applyCommand(msg raft.ApplyMsg) {
 	sm.lastIncludeIndex = msg.Index
-	sm.lastIncludeTerm = msg.Term
 	index := msg.Index
 
 	op := msg.Command.(Op)
-
-	switch op.Type {
-	case "Join":
-		sm.applyJoin(op)
-	case "Leave":
-		//do something
-		sm.applyLeave(op)
-	case "Move":
-		//do something
-		sm.applyMove(op)
-	case "Query":
-		//do something
-		sm.applyQuery(&op)
+	if _, ok := sm.executeSeq[op.Client]; !ok {
+		sm.executeSeq[op.Client] = -1
 	}
+	if op.Sequence > sm.executeSeq[op.Client] {
+		switch op.Type {
+		case "Join":
+			sm.applyJoin(op)
+		case "Leave":
+			//do something
+			sm.applyLeave(op)
+		case "Move":
+			//do something
+			sm.applyMove(op)
+		case "Query":
+			//do something
+			sm.applyQuery(&op)
+		}
+		sm.executeSeq[op.Client] = op.Sequence
+	} else {
+		if op.Type == "Query" {
+			sm.applyQuery(&op)
+		}
+	}
+
 	if _, ok := sm.notify[index]; !ok {
 		// fmt.Println(sm.me, "No request needed to be notified!")
 		return
@@ -386,6 +484,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sm.notify = make(map[int][]chan Op, 0)
 	sm.Msgs = list.New()
 	sm.Recv = make(chan raft.ApplyMsg, 0)
+	sm.executeSeq = make(map[int64]int, 0)
 
 	go func() {
 		for {
